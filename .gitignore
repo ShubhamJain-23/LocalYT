@@ -5,3 +5,4 @@ data/
 docker-compose.override.yml
 __pycache__/
 *.pyc
+folders.txt

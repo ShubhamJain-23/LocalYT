@@ -30,28 +30,20 @@ LocalYT is a fast, lightweight, open-source YouTube clone designed to serve your
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/yourusername/LocalYT.git
+git clone https://github.com/ShubhamJain-23/LocalYT.git
 cd LocalYT
 ```
 
 ### 2. Configure Your Video Folders
 By default, the app looks for videos inside the `data/` folder in the project directory.
 
-**To use your existing folders/drives:**
-1. Open `docker-compose.yml` (or create a `docker-compose.override.yml`).
-2. Add your drives/folders under the `backend` volumes list, and map them to `/app/data/something`.
-3. Update the `DATA_DIRS` environment variable to match the container paths, separated by commas.
+**The Easy Way (Windows only):**
+Simply double-click the `add_folder.bat` file in the project folder! It will prompt you to paste the path to your video folder (e.g. `D:\Movies`), and it will automatically reconfigure and restart Docker for you safely. You can run this file as many times as you want to add multiple drives.
 
-*Example `docker-compose.override.yml`:*
-```yaml
-services:
-  backend:
-    volumes:
-      - "E:\\Videos:/app/data/videos:ro"
-      - "D:\\Movies:/app/data/movies:ro"
-    environment:
-      - DATA_DIRS=/app/data/videos,/app/data/movies
-```
+**The Manual Way:**
+1. Open `folders.txt` and add your absolute paths (one per line).
+2. Run `powershell.exe -ExecutionPolicy Bypass -File generate_override.ps1` to generate the configuration.
+3. Restart docker with `docker-compose up -d`.
 
 ### 3. Run the App
 Start the containers in the background:
