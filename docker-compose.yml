@@ -1,0 +1,21 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - "./data:/app/data:ro"
+      # To mount external drives, uncomment and modify the lines below, or use docker-compose.override.yml
+      # - "E:\\Your Folder:/app/data/folder1:ro"
+      # - "D:\\:/app/data/drive2:ro"
+    environment:
+      - DATA_DIRS=/app/data
+      # If you mounted multiple drives above, list their container paths here:
+      # - DATA_DIRS=/app/data,/app/data/folder1,/app/data/drive2
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
