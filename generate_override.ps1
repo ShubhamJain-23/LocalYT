@@ -24,8 +24,8 @@ $counter = 1
 foreach ($folder in $cleanFolders) {
     # YAML needs double backslashes for quoted strings
     $escaped = $folder -replace '\\', '\\'
-    $yaml += "      - `"$escaped:/app/data/folder$counter:ro`"`n"
-    $dataDirs += "/app/data/folder$counter"
+    $yaml += ("      - `"{0}:/app/data_{1}:ro`"`n" -f $escaped, $counter)
+    $dataDirs += "/app/data_$counter"
     $counter++
 }
 

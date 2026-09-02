@@ -3,7 +3,14 @@ from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import urllib.parse
+import json
+import threading
+import redis
+import queue
+import subprocess
+
 
 app = FastAPI(title="LocalYT API")
 
@@ -16,8 +23,137 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+DB_DIR = Path("/app/db")
+DB_DIR.mkdir(parents=True, exist_ok=True)
+PROGRESS_FILE = DB_DIR / "progress.json"
+
+DURATIONS_FILE = DB_DIR / "durations.json"
+scan_queue = queue.Queue()
+
+def duration_worker():
+    while True:
+        path_str = scan_queue.get()
+        if path_str is None:
+            break
+            
+        try:
+            if r.exists(f"duration:{path_str}"):
+                scan_queue.task_done()
+                continue
+                
+            result = subprocess.run([
+                "ffprobe", "-v", "error", "-show_entries",
+                "format=duration", "-of",
+                "default=noprint_wrappers=1:nokey=1", path_str
+            ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5)
+            
+            duration = float(result.stdout)
+            r.set(f"duration:{path_str}", duration)
+        except Exception:
+            pass
+            
+        scan_queue.task_done()
+
+threading.Thread(target=duration_worker, daemon=True).start()
+
+def get_video_duration(file_path: Path) -> float:
+    path_str = file_path.as_posix()
+    try:
+        val = r.get(f"duration:{path_str}")
+        if val is not None:
+            return float(val)
+    except:
+        pass
+        
+    scan_queue.put(path_str)
+    return 0.0
+
+
+
+
+# Initialize Redis
+try:
+    r = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
+    
+    # Migrate old JSON data if present
+    if PROGRESS_FILE.exists():
+        try:
+            data = json.loads(PROGRESS_FILE.read_text())
+            for k, v in data.items():
+                if not r.exists(f"progress:{k}"):
+                    r.set(f"progress:{k}", v)
+            # rename to prevent re-migration
+            PROGRESS_FILE.rename(PROGRESS_FILE.with_suffix('.json.bak'))
+        except:
+            pass
+            
+    if DURATIONS_FILE.exists():
+        try:
+            data = json.loads(DURATIONS_FILE.read_text())
+            for k, v in data.items():
+                if not r.exists(f"duration:{k}"):
+                    r.set(f"duration:{k}", v)
+            DURATIONS_FILE.rename(DURATIONS_FILE.with_suffix('.json.bak'))
+        except:
+            pass
+except Exception as e:
+    print("Redis connection failed:", e)
+
+class ProgressUpdate(BaseModel):
+    url: str
+    time: float
+
+@app.post("/api/progress")
+def save_progress(progress: ProgressUpdate):
+    try:
+        r.set(f"progress:{progress.url}", progress.time)
+    except:
+        pass
+    return {"status": "ok"}
+
+@app.get("/api/progress")
+def get_progress_api(url: str):
+    try:
+        val = r.get(f"progress:{url}")
+        return {"time": float(val) if val else 0}
+    except:
+        return {"time": 0}
+
+def get_progress_val(url: str) -> float:
+    try:
+        val = r.get(f"progress:{url}")
+        return float(val) if val else 0.0
+    except:
+        return 0.0
+
 DATA_DIRS_ENV = os.environ.get("DATA_DIRS", "./data")
 ROOT_PATHS = [Path(d.strip()).resolve() for d in DATA_DIRS_ENV.split(",") if d.strip()]
+
+
+def get_folder_progress(folder_path: Path, channel_name: str, root: Path):
+    total_duration = 0.0
+    total_watched = 0.0
+    
+    progress_data = {}
+    if PROGRESS_FILE.exists():
+        try:
+            progress_data = json.loads(PROGRESS_FILE.read_text())
+        except:
+            pass
+            
+    for entry in folder_path.rglob("*"):
+        if entry.is_file() and entry.suffix.lower() in VIDEO_EXTENSIONS:
+            # Build relative path for url
+            rel_path = entry.relative_to(root)
+            vid_url = f"/api/stream?path={urllib.parse.quote(rel_path.as_posix())}"
+            
+            duration = get_video_duration(entry)
+            watched = progress_data.get(vid_url, 0.0)
+            
+            total_duration += duration
+            total_watched += min(watched, duration) # Cap watched at duration
+            
+    return total_duration, total_watched
 
 def get_safe_path(sub_path: str) -> Path:
     decoded_path = urllib.parse.unquote(sub_path)
@@ -53,34 +189,57 @@ def list_channels():
 
 @app.get("/api/channels/{channel_name}/playlists")
 def list_playlists(channel_name: str):
-    if channel_name == "Uncategorized":
-        return [{"name": "Root Videos"}]
-        
-    playlists = []
-    seen = set()
+    playlists = {}
     has_loose_videos = False
+    loose_dur = 0.0
+    loose_watch = 0.0
     
+    if channel_name == "Uncategorized":
+        for root in ROOT_PATHS:
+            if root.exists():
+                for entry in root.iterdir():
+                    if entry.is_file() and entry.suffix.lower() in VIDEO_EXTENSIONS:
+                        has_loose_videos = True
+                        dur = get_video_duration(entry)
+                        rel_path = entry.relative_to(root)
+                        vid_url = f"/api/stream?path={urllib.parse.quote(rel_path.as_posix())}"
+                        watch = get_progress_val(vid_url)
+                        loose_dur += dur
+                        loose_watch += min(watch, dur)
+        return [{"name": "Root Videos", "duration": loose_dur, "watched": loose_watch}]
+
     for root in ROOT_PATHS:
         channel_path = root / channel_name
         if channel_path.exists() and channel_path.is_dir():
             for entry in channel_path.iterdir():
                 if entry.is_dir() and not entry.name.startswith('.'):
-                    if entry.name not in seen:
-                        playlists.append({"name": entry.name})
-                        seen.add(entry.name)
+                    dur, watch = get_folder_progress(entry, channel_name, root)
+                    if entry.name not in playlists:
+                        playlists[entry.name] = {"name": entry.name, "duration": dur, "watched": watch}
+                    else:
+                        playlists[entry.name]["duration"] += dur
+                        playlists[entry.name]["watched"] += watch
                 elif entry.is_file() and entry.suffix.lower() in VIDEO_EXTENSIONS:
                     has_loose_videos = True
+                    dur = get_video_duration(entry)
+                    rel_path = entry.relative_to(root)
+                    vid_url = f"/api/stream?path={urllib.parse.quote(rel_path.as_posix())}"
+                    watch = get_progress_val(vid_url)
+                    loose_dur += dur
+                    loose_watch += min(watch, dur)
                     
+    res = list(playlists.values())
     if has_loose_videos:
-        playlists.insert(0, {"name": "Loose Videos"})
+        res.insert(0, {"name": "Loose Videos", "duration": loose_dur, "watched": loose_watch})
         
-    if not playlists and not has_loose_videos:
+    if not res:
         raise HTTPException(status_code=404, detail="Channel not found")
         
-    return playlists
+    return res
 
 def parse_video_files(files, rel_parent_path: str):
     videos = []
+    
     for entry in files:
         if entry.is_file() and entry.suffix.lower() in VIDEO_EXTENSIONS:
             base_name = entry.stem
@@ -94,11 +253,17 @@ def parse_video_files(files, rel_parent_path: str):
             
             rel_vid = f"{rel_parent_path}/{entry.name}" if rel_parent_path else entry.name
             vid_url = f"/api/stream?path={urllib.parse.quote(rel_vid)}"
+            
+            duration = get_video_duration(entry)
+            watched = get_progress_val(vid_url)
+            
             videos.append({
                 "title": base_name,
                 "filename": entry.name,
                 "url": vid_url,
-                "subtitles": subtitles
+                "subtitles": subtitles,
+                "duration": duration,
+                "watched": watched
             })
     return videos
 

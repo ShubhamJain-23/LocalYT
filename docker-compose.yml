@@ -4,14 +4,23 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - "./data:/app/data:ro"
+      - "./data:/app/data_default:ro"
+      - "./db:/app/db"
       # To mount external drives, uncomment and modify the lines below, or use docker-compose.override.yml
-      # - "E:\\Your Folder:/app/data/folder1:ro"
-      # - "D:\\:/app/data/drive2:ro"
+      # - "E:\\Your Folder:/app/data_1:ro"
+      # - "D:\\:/app/data_2:ro"
     environment:
-      - DATA_DIRS=/app/data
+      - DATA_DIRS=/app/data_default
       # If you mounted multiple drives above, list their container paths here:
-      # - DATA_DIRS=/app/data,/app/data/folder1,/app/data/drive2
+      # - DATA_DIRS=/app/data_default,/app/data_1,/app/data_2
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:alpine
+    command: redis-server --save 60 1
+    volumes:
+      - "./db/redis:/data"
 
   frontend:
     build: ./frontend
