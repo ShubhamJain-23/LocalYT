@@ -181,45 +181,94 @@ def _get_notes_folder(channel: str, playlist: str, root: Path) -> Path | None:
 
 @app.get("/api/notes/video")
 def get_video_notes(channel: str, playlist: str, filename: str):
-    """Return notes that share the same stem as the given video filename."""
+    """
+    Return notes for a specific video using three discovery strategies:
+      1. Exact stem match  — "Lecture 1.mp4" ↔ "Lecture 1.pdf"
+      2. Fuzzy containment — note stem is a substring of the video stem or vice-versa
+      3. Same-named folder — "Lecture 1/" folder → all note files inside (recursively)
+    Searches in the playlist root AND a "notes/" subfolder.
+    """
     stem = Path(filename).stem
-    notes = []
+    stem_lower = stem.lower()
+    notes: list[dict] = []
+    seen_paths: set[str] = set()
+
+    def add_note(f: Path, title: str, root: Path) -> None:
+        rel = f.relative_to(root).as_posix()
+        if rel not in seen_paths:
+            seen_paths.add(rel)
+            notes.append({
+                "title": title,
+                "path": rel,
+                "type": f.suffix.lower().lstrip('.'),
+            })
+
+    def is_fuzzy_match(note_stem: str) -> bool:
+        ns = note_stem.lower()
+        return ns == stem_lower or ns in stem_lower or stem_lower in ns
+
     for root in ROOT_PATHS:
         folder = _get_notes_folder(channel, playlist, root)
         if not folder:
             continue
-        for search_dir in [folder, folder / "notes"]:
-            if not search_dir.exists():
+
+        search_roots = [folder]
+        notes_dir = folder / "notes"
+        if notes_dir.exists() and notes_dir.is_dir():
+            search_roots.append(notes_dir)
+
+        for search_root in search_roots:
+            if not search_root.exists():
                 continue
-            for f in sorted(search_dir.iterdir()):
-                if f.is_file() and f.stem == stem and f.suffix.lower() in NOTE_EXTENSIONS:
-                    notes.append({
-                        "title": f.name,
-                        "path": f.relative_to(root).as_posix(),
-                        "type": f.suffix.lower().lstrip('.'),
-                    })
+
+            for entry in sorted(search_root.iterdir()):
+                if entry.is_file() and entry.suffix.lower() in NOTE_EXTENSIONS:
+                    # Strategy 1 & 2: exact or fuzzy name match
+                    if is_fuzzy_match(entry.stem):
+                        add_note(entry, entry.name, root)
+
+                elif entry.is_dir() and entry.stem == stem:
+                    # Strategy 3: folder whose name matches the video stem exactly
+                    for f in sorted(entry.rglob("*")):
+                        if f.is_file() and f.suffix.lower() in NOTE_EXTENSIONS:
+                            # Label as relative path inside the notes folder for clarity
+                            label = f.relative_to(entry).as_posix()
+                            add_note(f, label, root)
+
     return notes
 
 
 @app.get("/api/notes/playlist")
 def get_playlist_notes(channel: str, playlist: str):
-    """Return all note files found in the playlist folder."""
-    notes = []
+    """
+    Return ALL note files in the playlist folder tree (recursive).
+    Each item carries a "title" that is its path relative to the playlist
+    folder so the user sees context (e.g. "Lecture 1/slides.pdf").
+    """
+    notes: list[dict] = []
+    seen_paths: set[str] = set()
+
     for root in ROOT_PATHS:
         folder = _get_notes_folder(channel, playlist, root)
         if not folder:
             continue
-        for search_dir in [folder, folder / "notes"]:
-            if not search_dir.exists():
+
+        for f in sorted(folder.rglob("*")):
+            if not f.is_file() or f.suffix.lower() not in NOTE_EXTENSIONS:
                 continue
-            for f in sorted(search_dir.iterdir()):
-                if f.is_file() and f.suffix.lower() in NOTE_EXTENSIONS:
-                    notes.append({
-                        "title": f.stem,
-                        "filename": f.name,
-                        "path": f.relative_to(root).as_posix(),
-                        "type": f.suffix.lower().lstrip('.'),
-                    })
+            rel_root = f.relative_to(root).as_posix()
+            if rel_root in seen_paths:
+                continue
+            seen_paths.add(rel_root)
+            # Show path relative to the playlist folder as the display title
+            rel_playlist = f.relative_to(folder).as_posix()
+            notes.append({
+                "title": rel_playlist,      # e.g. "Lecture 1/slides.pdf"
+                "filename": f.name,
+                "path": rel_root,
+                "type": f.suffix.lower().lstrip('.'),
+            })
+
     return notes
 
 
