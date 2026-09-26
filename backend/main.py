@@ -165,6 +165,104 @@ def get_safe_path(sub_path: str) -> Path:
 
 VIDEO_EXTENSIONS = {'.mp4', '.webm', '.ogg', '.mkv', '.mov', '.avi'}
 SUBTITLE_EXTENSIONS = {'.vtt', '.srt'}
+NOTE_EXTENSIONS = {'.pdf', '.md', '.txt', '.docx', '.doc', '.rst', '.csv', '.rtf'}
+
+# ─── Note helpers ────────────────────────────────────────────────────────────
+
+def _get_notes_folder(channel: str, playlist: str, root: Path) -> Path | None:
+    if channel == "Uncategorized" and playlist == "Root Videos":
+        return root
+    if playlist == "Loose Videos":
+        p = root / channel
+        return p if p.exists() and p.is_dir() else None
+    p = root / channel / playlist
+    return p if p.exists() and p.is_dir() else None
+
+
+@app.get("/api/notes/video")
+def get_video_notes(channel: str, playlist: str, filename: str):
+    """Return notes that share the same stem as the given video filename."""
+    stem = Path(filename).stem
+    notes = []
+    for root in ROOT_PATHS:
+        folder = _get_notes_folder(channel, playlist, root)
+        if not folder:
+            continue
+        for search_dir in [folder, folder / "notes"]:
+            if not search_dir.exists():
+                continue
+            for f in sorted(search_dir.iterdir()):
+                if f.is_file() and f.stem == stem and f.suffix.lower() in NOTE_EXTENSIONS:
+                    notes.append({
+                        "title": f.name,
+                        "path": f.relative_to(root).as_posix(),
+                        "type": f.suffix.lower().lstrip('.'),
+                    })
+    return notes
+
+
+@app.get("/api/notes/playlist")
+def get_playlist_notes(channel: str, playlist: str):
+    """Return all note files found in the playlist folder."""
+    notes = []
+    for root in ROOT_PATHS:
+        folder = _get_notes_folder(channel, playlist, root)
+        if not folder:
+            continue
+        for search_dir in [folder, folder / "notes"]:
+            if not search_dir.exists():
+                continue
+            for f in sorted(search_dir.iterdir()):
+                if f.is_file() and f.suffix.lower() in NOTE_EXTENSIONS:
+                    notes.append({
+                        "title": f.stem,
+                        "filename": f.name,
+                        "path": f.relative_to(root).as_posix(),
+                        "type": f.suffix.lower().lstrip('.'),
+                    })
+    return notes
+
+
+@app.get("/api/notes/raw")
+def get_note_raw(path: str):
+    """Serve the raw note file (used for PDF iframe embedding)."""
+    file_path = get_safe_path(path)
+    ext = file_path.suffix.lower()
+    media_types = {
+        '.pdf': 'application/pdf',
+        '.txt': 'text/plain; charset=utf-8',
+        '.md':  'text/plain; charset=utf-8',
+        '.rst': 'text/plain; charset=utf-8',
+        '.csv': 'text/plain; charset=utf-8',
+        '.rtf': 'application/rtf',
+    }
+    return FileResponse(
+        file_path,
+        media_type=media_types.get(ext, 'application/octet-stream'),
+        headers={"Content-Disposition": "inline"},
+    )
+
+
+@app.get("/api/notes/content")
+def get_note_content(path: str):
+    """Return parsed text content for txt/md/docx notes."""
+    file_path = get_safe_path(path)
+    ext = file_path.suffix.lower()
+
+    if ext in ('.txt', '.md', '.rst', '.csv'):
+        content = file_path.read_text(encoding='utf-8', errors='replace')
+        return {"type": ext.lstrip('.'), "content": content}
+
+    if ext in ('.docx', '.doc'):
+        try:
+            from docx import Document
+            doc = Document(str(file_path))
+            text = '\n'.join(p.text for p in doc.paragraphs)
+            return {"type": "txt", "content": text}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to parse docx: {e}")
+
+    raise HTTPException(status_code=400, detail="Use /api/notes/raw for binary files like PDF")
 
 @app.get("/api/channels")
 def list_channels():
