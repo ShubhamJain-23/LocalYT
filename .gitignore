@@ -6,3 +6,8 @@ docker-compose.override.yml
 __pycache__/
 *.pyc
 folders.txt
+db/redis/dump.rdb
+db/*.json.bak
+*.py.bak
+patch_redis.py
+async_patch.py
