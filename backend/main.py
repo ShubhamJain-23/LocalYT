@@ -48,7 +48,7 @@ def duration_worker():
             ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5)
             
             duration = float(result.stdout)
-            r.set(f"duration:{path_str}", duration)
+            r.set(f"duration:{path_str}", duration, ex=7 * 24 * 3600)  # TTL: 7 days
         except Exception:
             pass
             
@@ -133,26 +133,14 @@ ROOT_PATHS = [Path(d.strip()).resolve() for d in DATA_DIRS_ENV.split(",") if d.s
 def get_folder_progress(folder_path: Path, channel_name: str, root: Path):
     total_duration = 0.0
     total_watched = 0.0
-    
-    progress_data = {}
-    if PROGRESS_FILE.exists():
-        try:
-            progress_data = json.loads(PROGRESS_FILE.read_text())
-        except:
-            pass
-            
     for entry in folder_path.rglob("*"):
         if entry.is_file() and entry.suffix.lower() in VIDEO_EXTENSIONS:
-            # Build relative path for url
             rel_path = entry.relative_to(root)
             vid_url = f"/api/stream?path={urllib.parse.quote(rel_path.as_posix())}"
-            
             duration = get_video_duration(entry)
-            watched = progress_data.get(vid_url, 0.0)
-            
+            watched = get_progress_val(vid_url)  # Redis-backed
             total_duration += duration
-            total_watched += min(watched, duration) # Cap watched at duration
-            
+            total_watched += min(watched, duration)  # cap at duration
     return total_duration, total_watched
 
 def get_safe_path(sub_path: str) -> Path:
@@ -315,32 +303,40 @@ def get_note_content(path: str):
 
 @app.get("/api/channels")
 def list_channels():
+    cache_key = "cache:channels"
+    cached = r.get(cache_key)
+    if cached:
+        return json.loads(cached)
+
     channels = []
     seen = set()
     has_root_videos = False
-    
     for root in ROOT_PATHS:
         if root.exists():
             for entry in root.iterdir():
-                if entry.is_dir() and not entry.name.startswith('.'):
+                if entry.is_dir() and not entry.name.startswith("."):
                     if entry.name not in seen:
                         channels.append({"name": entry.name})
                         seen.add(entry.name)
                 elif entry.is_file() and entry.suffix.lower() in VIDEO_EXTENSIONS:
                     has_root_videos = True
-                    
     if has_root_videos:
         channels.insert(0, {"name": "Uncategorized"})
-        
+    r.set(cache_key, json.dumps(channels), ex=30)
     return channels
 
 @app.get("/api/channels/{channel_name}/playlists")
 def list_playlists(channel_name: str):
+    cache_key = f"cache:playlists:{channel_name}"
+    cached = r.get(cache_key)
+    if cached:
+        return json.loads(cached)
+
     playlists = {}
     has_loose_videos = False
     loose_dur = 0.0
     loose_watch = 0.0
-    
+
     if channel_name == "Uncategorized":
         for root in ROOT_PATHS:
             if root.exists():
@@ -353,13 +349,15 @@ def list_playlists(channel_name: str):
                         watch = get_progress_val(vid_url)
                         loose_dur += dur
                         loose_watch += min(watch, dur)
-        return [{"name": "Root Videos", "duration": loose_dur, "watched": loose_watch}]
+        res = [{"name": "Root Videos", "duration": loose_dur, "watched": loose_watch}]
+        r.set(cache_key, json.dumps(res), ex=30)
+        return res
 
     for root in ROOT_PATHS:
         channel_path = root / channel_name
         if channel_path.exists() and channel_path.is_dir():
             for entry in channel_path.iterdir():
-                if entry.is_dir() and not entry.name.startswith('.'):
+                if entry.is_dir() and not entry.name.startswith("."):
                     dur, watch = get_folder_progress(entry, channel_name, root)
                     if entry.name not in playlists:
                         playlists[entry.name] = {"name": entry.name, "duration": dur, "watched": watch}
@@ -374,14 +372,13 @@ def list_playlists(channel_name: str):
                     watch = get_progress_val(vid_url)
                     loose_dur += dur
                     loose_watch += min(watch, dur)
-                    
+
     res = list(playlists.values())
     if has_loose_videos:
         res.insert(0, {"name": "Loose Videos", "duration": loose_dur, "watched": loose_watch})
-        
     if not res:
         raise HTTPException(status_code=404, detail="Channel not found")
-        
+    r.set(cache_key, json.dumps(res), ex=30)
     return res
 
 def parse_video_files(files, rel_parent_path: str):
@@ -416,19 +413,25 @@ def parse_video_files(files, rel_parent_path: str):
 
 @app.get("/api/channels/{channel_name}/playlists/{playlist_name}/videos")
 def list_videos(channel_name: str, playlist_name: str):
+    cache_key = f"cache:videos:{channel_name}:{playlist_name}"
+    cached = r.get(cache_key)
+    if cached:
+        return json.loads(cached)
+
     videos = []
-    
     if channel_name == "Uncategorized" and playlist_name == "Root Videos":
         for root in ROOT_PATHS:
             if root.exists():
                 videos.extend(parse_video_files(list(root.iterdir()), ""))
+        r.set(cache_key, json.dumps(videos), ex=30)
         return videos
-        
+
     if playlist_name == "Loose Videos":
         for root in ROOT_PATHS:
             channel_path = root / channel_name
             if channel_path.exists() and channel_path.is_dir():
                 videos.extend(parse_video_files(list(channel_path.iterdir()), channel_name))
+        r.set(cache_key, json.dumps(videos), ex=30)
         return videos
 
     # Normal playlist
@@ -437,7 +440,7 @@ def list_videos(channel_name: str, playlist_name: str):
         if playlist_path.exists() and playlist_path.is_dir():
             rel_path = f"{channel_name}/{playlist_name}"
             videos.extend(parse_video_files(list(playlist_path.iterdir()), rel_path))
-            
+    r.set(cache_key, json.dumps(videos), ex=30)
     return videos
 
 def stream_file(path: Path, start: int, end: int):
